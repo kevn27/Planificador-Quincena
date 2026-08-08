@@ -333,6 +333,8 @@
     ingreso: 0, ahorroPct: 10,
     inicio: q.inicio, fin: q.fin,
     fijos: [], gastos: [],
+    borrados: [],        // lápidas {id, mod}: sin esto, lo borrado en un equipo revive desde el otro
+    camposMod: null,     // última vez que cambió un campo suelto (ingreso, fechas, moneda…)
     actualizado: null
   });
 
@@ -342,11 +344,73 @@
     if (guardado) state = Object.assign(porDefecto(), guardado);
   } catch { /* datos corruptos: arrancamos limpio */ }
 
+  const ahora = () => new Date().toISOString();
+  const ts    = s => s ? new Date(s).getTime() : 0;
+
   const guardar = () => {
-    state.actualizado = new Date().toISOString();
+    state.actualizado = ahora();
     localStorage.setItem(KEY, JSON.stringify(state));
     programarSyncNube();
   };
+
+  // Marca un campo suelto como modificado ahora (los escalares se resuelven en bloque)
+  const guardarCampos = () => { state.camposMod = ahora(); guardar(); };
+
+  const borrarItem = (lista, id) => {
+    state[lista] = state[lista].filter(x => x.id !== id);
+    state.borrados = [...(state.borrados || []), { id, mod: ahora() }];
+    guardar();
+  };
+
+  /* ---------- Fusión entre dispositivos ----------
+     Cada ítem lleva su propia marca `mod`, así que en vez de que un dispositivo
+     pise al otro por completo, se unen las listas y se resuelve ítem por ítem. */
+  const TUMBA_VIDA = 90 * 86400000;   // las lápidas caducan a los 90 días
+
+  function fusionarTumbas(a = [], b = []) {
+    const m = new Map();
+    [...a, ...b].forEach(t => {
+      const prev = m.get(t.id);
+      if (!prev || ts(t.mod) > ts(prev.mod)) m.set(t.id, t);
+    });
+    const limite = Date.now() - TUMBA_VIDA;
+    return [...m.values()].filter(t => ts(t.mod) > limite);
+  }
+
+  function fusionarLista(local = [], remoto = [], tumbas) {
+    const m = new Map();
+    const poner = it => {
+      const prev = m.get(it.id);
+      if (!prev || ts(it.mod) >= ts(prev.mod)) m.set(it.id, it);
+    };
+    local.forEach(poner);
+    remoto.forEach(poner);
+
+    const porId = new Map(tumbas.map(t => [t.id, ts(t.mod)]));
+    // Un ítem sobrevive solo si se editó después de haber sido borrado
+    return [...m.values()].filter(it => {
+      const borradoEn = porId.get(it.id);
+      return borradoEn === undefined || ts(it.mod) > borradoEn;
+    });
+  }
+
+  function fusionar(local, remoto) {
+    const tumbas = fusionarTumbas(local.borrados, remoto.borrados);
+    const out = {
+      ...local,
+      fijos:    fusionarLista(local.fijos,  remoto.fijos,  tumbas),
+      gastos:   fusionarLista(local.gastos, remoto.gastos, tumbas),
+      borrados: tumbas
+    };
+    // Los campos sueltos no tienen marca individual: gana el lado tocado más recientemente
+    if (ts(remoto.camposMod) > ts(local.camposMod)) {
+      ["ingreso","ahorroPct","inicio","fin","moneda","tema"].forEach(k => {
+        if (remoto[k] !== undefined) out[k] = remoto[k];
+      });
+      out.camposMod = remoto.camposMod;
+    }
+    return out;
+  }
 
   /* ---------- Formato de dinero ---------- */
   let fmt = new Intl.NumberFormat("es-CR", { style:"currency", currency:"CRC", maximumFractionDigits:0 });
@@ -471,24 +535,24 @@
 
       const chk = document.createElement("input");
       chk.type = "checkbox"; chk.checked = !!f.pagado; chk.title = "Marcar como pagado";
-      chk.onchange = () => { f.pagado = chk.checked; guardar(); render(); };
+      chk.onchange = () => { f.pagado = chk.checked; f.mod = ahora(); guardar(); render(); };
       const tdC = document.createElement("td"); tdC.className = "act"; tdC.appendChild(chk);
 
       const nom = document.createElement("input");
       nom.type = "text"; nom.value = f.nombre; nom.className = "mini";
       nom.style.background = "transparent"; nom.style.border = "1px solid transparent";
-      nom.onchange = () => { f.nombre = nom.value; guardar(); };
+      nom.onchange = () => { f.nombre = nom.value; f.mod = ahora(); guardar(); };
       const tdN = document.createElement("td"); tdN.appendChild(nom);
 
       const mon = document.createElement("input");
       mon.type = "number"; mon.value = f.monto; mon.className = "mini"; mon.min = "0";
       mon.style.background = "transparent"; mon.style.border = "1px solid transparent";
-      mon.onchange = () => { f.monto = +mon.value || 0; guardar(); render(); };
+      mon.onchange = () => { f.monto = +mon.value || 0; f.mod = ahora(); guardar(); render(); };
       const tdM = document.createElement("td"); tdM.className = "num"; tdM.appendChild(mon);
 
       const del = document.createElement("button");
       del.className = "btn icon"; del.textContent = "×"; del.title = "Eliminar";
-      del.onclick = () => { state.fijos = state.fijos.filter(x => x.id !== f.id); guardar(); render(); };
+      del.onclick = () => { borrarItem("fijos", f.id); render(); };
       const tdD = document.createElement("td"); tdD.className = "act"; tdD.appendChild(del);
 
       tr.append(tdC, tdN, tdM, tdD);
@@ -515,7 +579,7 @@
       tr.children[1].textContent = g.desc || "—";   // textContent evita inyección de HTML desde el texto del usuario
       const del = document.createElement("button");
       del.className = "btn icon"; del.textContent = "×"; del.title = "Eliminar";
-      del.onclick = () => { state.gastos = state.gastos.filter(x => x.id !== g.id); guardar(); render(); };
+      del.onclick = () => { borrarItem("gastos", g.id); render(); };
       tr.children[3].appendChild(del);
       tb.appendChild(tr);
     });
@@ -532,7 +596,7 @@
     el.value = state[prop];
     el.addEventListener("input", () => {
       state[prop] = num ? (+el.value || 0) : el.value;
-      guardar(); render();
+      guardarCampos(); render();
     });
   };
 
@@ -540,7 +604,7 @@
     const nombre = $("fNombre").value.trim();
     const monto  = +$("fMonto").value || 0;
     if (!nombre && !monto) return;
-    state.fijos.push({ id: uid(), nombre: nombre || "Sin nombre", monto, pagado: false });
+    state.fijos.push({ id: uid(), nombre: nombre || "Sin nombre", monto, pagado: false, mod: ahora() });
     $("fNombre").value = ""; $("fMonto").value = ""; $("fNombre").focus();
     guardar(); render();
   };
@@ -552,7 +616,8 @@
       id: uid(),
       desc: $("gDesc").value.trim(),
       monto,
-      fecha: $("gFecha").value || hoyISO()
+      fecha: $("gFecha").value || hoyISO(),
+      mod: ahora()
     });
     $("gDesc").value = ""; $("gMonto").value = ""; $("gDesc").focus();
     guardar(); render();
@@ -566,15 +631,15 @@
     const n = quincenaActual();
     state.inicio = n.inicio; state.fin = n.fin;
     $("inicio").value = n.inicio; $("fin").value = n.fin;
-    guardar(); render();
+    guardarCampos(); render();
   };
 
-  $("moneda").onchange = e => { setMoneda(e.target.value); guardar(); render(); };
+  $("moneda").onchange = e => { setMoneda(e.target.value); guardarCampos(); render(); };
 
   $("tema").onclick = () => {
     state.tema = state.tema === "dark" ? "light" : "dark";
     document.documentElement.dataset.theme = state.tema;
-    guardar();
+    guardarCampos();
   };
 
   // Menú desplegable de exportar
@@ -632,8 +697,15 @@
   $("reiniciar").onclick = () => {
     if (!confirm("¿Borrar todo y empezar una quincena nueva? Esto no se puede deshacer.")) return;
     const tema = state.tema, moneda = state.moneda;
+    // Sin lápidas, la siguiente fusión traería de vuelta todo lo borrado desde la nube
+    const t = ahora();
+    const tumbas = fusionarTumbas(
+      state.borrados,
+      [...state.fijos, ...state.gastos].map(x => ({ id: x.id, mod: t }))
+    );
     state = porDefecto();
     state.tema = tema; state.moneda = moneda;
+    state.borrados = tumbas; state.camposMod = t;
     setMoneda(moneda);
     document.querySelectorAll("input").forEach(i => { if (i.type !== "date") i.value = ""; });
     $("ingreso").value = 0; $("ahorroPct").value = state.ahorroPct;
@@ -648,12 +720,36 @@
     syncTimer = setTimeout(subirNube, 1200);
   }
 
+  // Foto de los campos sueltos, para saber si hace falta repintar los inputs
+  const instantaneaCampos = () =>
+    JSON.stringify([state.ingreso, state.ahorroPct, state.inicio, state.fin, state.moneda, state.tema]);
+
   async function subirNube() {
     if (!sesion || !sb) return;
+
+    // Leer antes de escribir: es lo que permite que dos dispositivos se fusionen
+    // en vez de que el último en guardar pise al otro.
+    const { data: remoto, error: errLectura } = await sb.from("quincenas")
+      .select("data").eq("user_id", sesion.user.id).maybeSingle();
+
+    if (errLectura) { $("cuentaEstado").textContent = "No se pudo sincronizar."; return; }
+
+    if (remoto && remoto.data) {
+      const antes = JSON.stringify(state);
+      const camposAntes = instantaneaCampos();
+      state = fusionar(state, remoto.data);
+      if (JSON.stringify(state) !== antes) {
+        localStorage.setItem(KEY, JSON.stringify(state));
+        // Solo repintamos los inputs si de verdad cambiaron, para no interrumpir lo que estés escribiendo
+        if (instantaneaCampos() !== camposAntes) refrescarCamposDesdeEstado();
+        else render();
+      }
+    }
+
     const { error } = await sb.from("quincenas").upsert({
       user_id: sesion.user.id,
       data: state,
-      updated_at: new Date().toISOString()
+      updated_at: ahora()
     });
     $("cuentaEstado").textContent = error ? "No se pudo sincronizar." : "Sincronizado ✓";
   }
@@ -672,24 +768,7 @@
   async function sincronizarAlEntrar() {
     if (!sesion || !sb) return;
     $("cuentaEstado").textContent = "Sincronizando…";
-    const { data, error } = await sb.from("quincenas")
-      .select("data, updated_at").eq("user_id", sesion.user.id).maybeSingle();
-    if (error) { $("cuentaEstado").textContent = "No se pudo sincronizar."; return; }
-
-    if (data) {
-      const remotoTs = new Date(data.updated_at).getTime();
-      const localTs  = state.actualizado ? new Date(state.actualizado).getTime() : 0;
-      if (remotoTs > localTs) {
-        state = Object.assign(porDefecto(), data.data);
-        localStorage.setItem(KEY, JSON.stringify(state));
-        refrescarCamposDesdeEstado();
-        $("cuentaEstado").textContent = "Datos de la nube cargados ✓";
-      } else {
-        await subirNube();
-      }
-    } else {
-      await subirNube();
-    }
+    await subirNube();   // subirNube ya hace leer → fusionar → escribir
   }
 
   function actualizarUICuenta() {
