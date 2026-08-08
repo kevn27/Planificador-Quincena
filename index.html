@@ -106,6 +106,32 @@
   input.mini{padding:7px 9px}
   .foot{color:var(--muted);font-size:12px;text-align:center;margin-top:26px}
   .foot .credito{display:inline-block; font-size:12px; opacity:.85}
+
+  /* Dropdown de exportar */
+  .dropdown{position:relative; display:inline-block}
+  .dropdown-menu{
+    display:none; position:absolute; right:0; top:calc(100% + 6px); z-index:20;
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    box-shadow:var(--shadow); padding:6px; min-width:190px;
+  }
+  .dropdown.open .dropdown-menu{display:block}
+  .dropdown-menu button{
+    display:block; width:100%; text-align:left; background:transparent; border:none;
+    color:var(--txt); padding:8px 10px; border-radius:7px; cursor:pointer; font-size:13px;
+  }
+  .dropdown-menu button:hover{background:var(--panel-2); color:var(--accent)}
+
+  /* Vista de impresión / PDF */
+  @media print{
+    body{background:#fff; color:#000; padding:0}
+    header, .addrow, #reiniciar, .dropdown, #tema, .empty, .act, th:last-child, td:last-child{display:none !important}
+    .card{box-shadow:none; border:1px solid #ccc; break-inside:avoid}
+    input{border:none !important; background:transparent !important; color:#000 !important}
+    .wrap::before{
+      content:"Planificador de Quincena"; display:block; font-size:20px; font-weight:700; margin-bottom:4px;
+    }
+    .foot{margin-top:20px}
+  }
 </style>
 </head>
 <body>
@@ -124,7 +150,13 @@
       <option value="MXN">$ Pesos MX</option>
     </select>
     <button class="btn ghost" id="tema" title="Cambiar tema">◐</button>
-    <button class="btn ghost" id="exportar">Exportar</button>
+    <div class="dropdown" id="exportDD">
+      <button class="btn ghost" id="exportarBtn">Exportar ▾</button>
+      <div class="dropdown-menu" id="exportMenu">
+        <button id="exportarExcel">📊 Exportar a Excel</button>
+        <button id="exportarPDF">🖨️ Exportar a PDF</button>
+      </div>
+    </div>
     <button class="btn ghost" id="reiniciar">Reiniciar</button>
   </header>
 
@@ -503,13 +535,56 @@
     guardar();
   };
 
-  $("exportar").onclick = () => {
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+  // Menú desplegable de exportar
+  const dd = $("exportDD");
+  $("exportarBtn").onclick = e => { e.stopPropagation(); dd.classList.toggle("open"); };
+  document.addEventListener("click", () => dd.classList.remove("open"));
+
+  // --- Exportar a Excel (CSV con separador ; y BOM UTF-8, formato que Excel reconoce de una) ---
+  const csvCelda = v => `"${String(v).replace(/"/g, '""')}"`;
+  const csvFila = arr => arr.map(csvCelda).join(";");
+
+  $("exportarExcel").onclick = () => {
+    const c = calcular();
+    const filas = [];
+
+    filas.push(["Planificador de Quincena"]);
+    filas.push([`${state.inicio} a ${state.fin}`]);
+    filas.push([]);
+    filas.push(["Resumen", "Monto"]);
+    filas.push(["Ingreso", c.ingreso]);
+    filas.push(["Gastos fijos", c.fijos]);
+    filas.push(["Ahorro", c.ahorro]);
+    filas.push(["Disponible libre", c.libre]);
+    filas.push(["Gastado", c.gastado]);
+    filas.push(["Restante", c.restante]);
+    filas.push(["Disponible por día", Math.round(c.porDia * 100) / 100]);
+    filas.push([]);
+
+    filas.push(["Gastos fijos"]);
+    filas.push(["Concepto", "Monto", "Pagado"]);
+    state.fijos.forEach(f => filas.push([f.nombre, f.monto, f.pagado ? "Sí" : "No"]));
+    filas.push([]);
+
+    filas.push(["Gastos del día a día"]);
+    filas.push(["Fecha", "Descripción", "Monto"]);
+    [...state.gastos].sort((a,b) => a.fecha.localeCompare(b.fecha))
+      .forEach(g => filas.push([g.fecha, g.desc || "—", g.monto]));
+
+    const csv = "﻿" + filas.map(csvFila).join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `quincena-${state.inicio}.json`;
+    a.download = `quincena-${state.inicio}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
+    dd.classList.remove("open");
+  };
+
+  // --- Exportar a PDF: usa el diálogo de impresión nativo del navegador ("Guardar como PDF") ---
+  $("exportarPDF").onclick = () => {
+    dd.classList.remove("open");
+    window.print();
   };
 
   $("reiniciar").onclick = () => {
