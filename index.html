@@ -149,6 +149,22 @@
       <option value="EUR">€ Euros</option>
       <option value="MXN">$ Pesos MX</option>
     </select>
+    <div class="dropdown" id="cuentaDD">
+      <button class="btn ghost" id="cuentaBtn">☁️ <span id="cuentaLabel">Sincronizar</span></button>
+      <div class="dropdown-menu" id="cuentaMenu" style="min-width:240px;padding:10px">
+        <div id="cuentaLogueado" style="display:none">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:8px;word-break:break-all" id="cuentaEmail"></div>
+          <div style="font-size:12px;color:var(--ok);margin-bottom:8px" id="cuentaEstado"></div>
+          <button class="btn" id="cerrarSesion" style="width:100%">Cerrar sesión</button>
+        </div>
+        <div id="cuentaAnonimo">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Sincronizá tus datos entre dispositivos con un enlace mágico por correo</div>
+          <input type="email" id="loginEmail" placeholder="tu@correo.com" class="mini" style="width:100%;margin-bottom:8px">
+          <button class="btn primary" id="enviarEnlace" style="width:100%">Enviar enlace mágico</button>
+          <div id="loginMsg" style="font-size:12px;color:var(--muted);margin-top:8px"></div>
+        </div>
+      </div>
+    </div>
     <button class="btn ghost" id="tema" title="Cambiar tema">◐</button>
     <div class="dropdown" id="exportDD">
       <button class="btn ghost" id="exportarBtn">Exportar ▾</button>
@@ -260,12 +276,21 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 (() => {
   "use strict";
   const KEY = "planificadorQuincena.v1";
   const $ = id => document.getElementById(id);
   const uid = () => Math.random().toString(36).slice(2, 9);
+
+  /* ---------- Nube (Supabase) ---------- */
+  const SUPABASE_URL = "https://gbatrhyebdbebtvfeqia.supabase.co";
+  const SUPABASE_KEY = "sb_publishable_if5bhL9_bg2-Ym6mj3orsA_N2R2ZiFs";
+  let sb = null;
+  try { sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY); } catch { sb = null; }
+  let sesion = null;
+  let syncTimer = null;
 
   /* ---------- Fechas (en UTC puro para evitar corrimientos de zona horaria) ---------- */
   const hoyISO = () => new Date().toISOString().slice(0, 10);
@@ -295,7 +320,8 @@
     moneda: "CRC", tema: "dark",
     ingreso: 0, ahorroPct: 10,
     inicio: q.inicio, fin: q.fin,
-    fijos: [], gastos: []
+    fijos: [], gastos: [],
+    actualizado: null
   });
 
   let state = porDefecto();
@@ -304,7 +330,11 @@
     if (guardado) state = Object.assign(porDefecto(), guardado);
   } catch { /* datos corruptos: arrancamos limpio */ }
 
-  const guardar = () => localStorage.setItem(KEY, JSON.stringify(state));
+  const guardar = () => {
+    state.actualizado = new Date().toISOString();
+    localStorage.setItem(KEY, JSON.stringify(state));
+    programarSyncNube();
+  };
 
   /* ---------- Formato de dinero ---------- */
   let fmt = new Intl.NumberFormat("es-CR", { style:"currency", currency:"CRC", maximumFractionDigits:0 });
@@ -598,6 +628,100 @@
     $("inicio").value = state.inicio; $("fin").value = state.fin;
     guardar(); render();
   };
+
+  /* ---------- Nube: sincronización ---------- */
+  function programarSyncNube() {
+    if (!sesion || !sb) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(subirNube, 1200);
+  }
+
+  async function subirNube() {
+    if (!sesion || !sb) return;
+    const { error } = await sb.from("quincenas").upsert({
+      user_id: sesion.user.id,
+      data: state,
+      updated_at: new Date().toISOString()
+    });
+    $("cuentaEstado").textContent = error ? "No se pudo sincronizar." : "Sincronizado ✓";
+  }
+
+  function refrescarCamposDesdeEstado() {
+    $("ingreso").value = state.ingreso;
+    $("ahorroPct").value = state.ahorroPct;
+    $("inicio").value = state.inicio;
+    $("fin").value = state.fin;
+    $("moneda").value = state.moneda;
+    setMoneda(state.moneda);
+    document.documentElement.dataset.theme = state.tema;
+    render();
+  }
+
+  async function sincronizarAlEntrar() {
+    if (!sesion || !sb) return;
+    $("cuentaEstado").textContent = "Sincronizando…";
+    const { data, error } = await sb.from("quincenas")
+      .select("data, updated_at").eq("user_id", sesion.user.id).maybeSingle();
+    if (error) { $("cuentaEstado").textContent = "No se pudo sincronizar."; return; }
+
+    if (data) {
+      const remotoTs = new Date(data.updated_at).getTime();
+      const localTs  = state.actualizado ? new Date(state.actualizado).getTime() : 0;
+      if (remotoTs > localTs) {
+        state = Object.assign(porDefecto(), data.data);
+        localStorage.setItem(KEY, JSON.stringify(state));
+        refrescarCamposDesdeEstado();
+        $("cuentaEstado").textContent = "Datos de la nube cargados ✓";
+      } else {
+        await subirNube();
+      }
+    } else {
+      await subirNube();
+    }
+  }
+
+  function actualizarUICuenta() {
+    const logueado = !!sesion;
+    $("cuentaLogueado").style.display = logueado ? "" : "none";
+    $("cuentaAnonimo").style.display  = logueado ? "none" : "";
+    $("cuentaLabel").textContent = logueado ? "Conectado" : "Sincronizar";
+    if (logueado) $("cuentaEmail").textContent = sesion.user.email;
+  }
+
+  const cuentaDD = $("cuentaDD");
+  $("cuentaBtn").onclick = e => { e.stopPropagation(); cuentaDD.classList.toggle("open"); };
+  document.addEventListener("click", () => cuentaDD.classList.remove("open"));
+  $("cuentaMenu").addEventListener("click", e => e.stopPropagation());
+
+  $("enviarEnlace").onclick = async () => {
+    if (!sb) { $("loginMsg").textContent = "No se pudo cargar el servicio de nube."; return; }
+    const email = $("loginEmail").value.trim();
+    if (!email) return;
+    $("enviarEnlace").disabled = true;
+    $("loginMsg").textContent = "Enviando…";
+    const { error } = await sb.auth.signInWithOtp({
+      email, options: { emailRedirectTo: location.href.split("#")[0] }
+    });
+    $("enviarEnlace").disabled = false;
+    $("loginMsg").textContent = error
+      ? "No se pudo enviar: " + error.message
+      : "Listo, revisá tu correo y hacé clic en el enlace.";
+  };
+
+  $("cerrarSesion").onclick = async () => { if (sb) await sb.auth.signOut(); };
+
+  if (sb) {
+    sb.auth.onAuthStateChange((_evento, session) => {
+      sesion = session;
+      actualizarUICuenta();
+      if (sesion) sincronizarAlEntrar();
+    });
+    sb.auth.getSession().then(({ data }) => {
+      sesion = data.session;
+      actualizarUICuenta();
+      if (sesion) sincronizarAlEntrar();
+    });
+  }
 
   /* ---------- Arranque ---------- */
   document.documentElement.dataset.theme = state.tema;
